@@ -949,9 +949,10 @@ def draw_bingx_icon(
     if not cfg:
         return
 
-    icon_path = "assets/bingx/icon.png"
+    icon_path = os.path.join(BASE_DIR, "assets", "bingx", "icon.png")
     if not os.path.exists(icon_path):
         return
+
 
     icon = Image.open(icon_path).convert("RGBA")
     size = int(cfg.get("size", 24))
@@ -970,9 +971,9 @@ def draw_bingx_icon(
 
     img.paste(icon, (x, y), icon)
 
-def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
-    template_path = f"assets/{data['exchange']}/template.png"
-    output_path = "output/result.png"
+def generate_trade_image( dict, percent: float, pnl: float, pnl_usdt: float) -> str:
+    template_path = os.path.join(BASE_DIR, "assets", data["exchange"], "template.png")
+    output_path = os.path.join(BASE_DIR, "output", "result.png")
 
     cfg = FONTS[data["exchange"]]
     layout = LAYOUT[data["exchange"]]
@@ -980,7 +981,8 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     font_bold = cfg["files"]["bold"]
     sizes = cfg["sizes"]
 
-    os.makedirs("output", exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
 
     img = Image.open(template_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
@@ -1307,9 +1309,10 @@ def generate_custom_bybit_image(data: dict) -> str:
         pnl = 0.0
 
     template_side = "long" if pnl >= 0 else "short"
-    template_path = f"assets/bybit/screenshot_{template_side}.png"
-    output_path = "images/custom_bybit.png"
-    os.makedirs("images", exist_ok=True)
+    template_path = os.path.join(BASE_DIR, "assets", "bybit", f"screenshot_{template_side}.png")
+    output_path = os.path.join(BASE_DIR, "images", "custom_bybit.png")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
 
     img = Image.open(template_path).convert("RGBA")
     w, h = img.size
@@ -1461,9 +1464,10 @@ def generate_custom_bingx_image(data: dict) -> str:
         pnl = 0.0
 
     template_side = "long" if pnl >= 0 else "short"
-    template_path = f"assets/bingx/screenshot_{template_side}.png"
-    output_path = "images/custom_bingx.png"
-    os.makedirs("images", exist_ok=True)
+    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
+    output_path = os.path.join(BASE_DIR, "images", "custom_bingx.png")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
 
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Создай {template_path}")
