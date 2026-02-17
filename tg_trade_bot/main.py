@@ -166,6 +166,7 @@ async def test_bybit(message: Message):
 
     qty = calculate_qty(exchange, amount, entry, leverage)
     cost = calculate_cost(exchange, amount, leverage)
+    side = "long"
     percent, pnl = calculate_pnl(entry, mark, side, leverage)
     pnl_usdt = round(cost * pnl / 100, 2)
 
@@ -198,8 +199,16 @@ async def test_bingx(message: Message):
 
     qty = calculate_qty(exchange, amount, entry, leverage)
     cost = calculate_cost(exchange, amount, leverage)
-    percent, pnl = calculate_pnl(entry, mark, side, leverage)
-    pnl_usdt = round(cost * pnl / 100, 2)
+
+    pnl_usdt, margin_pos, percent = calculate_pnl_linear(
+        entry,
+        mark,
+        qty,
+        side,
+        leverage,
+    )
+    pnl = percent  # для generate_trade_image
+
     liquidation = calculate_liquidation(entry, leverage, side)
 
     fake_data = {
@@ -218,6 +227,7 @@ async def test_bingx(message: Message):
 
     path = generate_trade_image(fake_data, percent, pnl, pnl_usdt)
     await message.answer_photo(FSInputFile(path))
+
     
 @dp.message(Command("test_bybit_custom"))
 async def test_bybit_custom(message: Message):
@@ -325,8 +335,16 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
 
     qty = calculate_qty(exchange, amount, entry, leverage)
     cost = calculate_cost(exchange, amount, leverage)
-    percent, pnl = calculate_pnl(entry, mark, side, leverage)
-    pnl_usdt = round(cost * pnl / 100, 2)
+    pnl_usdt, margin_pos, percent = calculate_pnl_linear(
+    entry,
+    mark,
+    qty,
+    side,
+    leverage,
+)
+    # percent — PnL% позиции, pnl_usdt — сам PnL в USDT
+    pnl = percent
+
     liquidation = calculate_liquidation(entry, leverage, side)
 
     data = {
@@ -549,13 +567,15 @@ async def get_leverage(message: Message, state: FSMContext):
         data["amount"],
         leverage,
     )
-    percent, pnl = calculate_pnl(
-        data["entry"],
-        data["mark"],
-        data["side"],
-        leverage,
+    pnl_usdt, margin_pos, percent = calculate_pnl_linear(
+    data["entry"],
+    data["mark"],
+    qty,
+    data["side"],
+    leverage,
     )
-    pnl_usdt = round(cost * pnl / 100, 2)
+    pnl = percent
+
     liquidation = calculate_liquidation(data["entry"], leverage, data["side"])
 
     data.update(
@@ -668,25 +688,30 @@ async def get_mark_from_exchange(call: CallbackQuery, state: FSMContext):
 # =====================================================
 
 def calculate_qty(exchange: str, amount: float, entry: float, leverage: int | float) -> float:
-    if exchange == "bybit":
-        return round((amount * leverage) / entry, 4)
-    if exchange == "bingx":
-        return round(amount * leverage, 2)
+    """
+    amount — твоя маржа в USDT.
+    qty — размер позиции в монетах (BTC, PYTH и т.д.).
+    Формула одинаковая для Bybit и BingX.
+    """
     return round((amount * leverage) / entry, 4)
+
+def calculate_liquidation(entry: float, leverage: int | float, side: str, mm: float = 0.005) -> float:
+    """
+    Простейшая оценка цены ликвидации:
+    - mm — maintenance margin (0.5% по умолчанию)
+    """
+    if side == "long":
+        return entry * (1 - 1 / leverage + mm)
+    else:
+        return entry * (1 + 1 / leverage - mm)
 
 
 def calculate_cost(exchange: str, amount: float, leverage: int | float) -> float:
-    if exchange == "bybit":
-        return round(amount * leverage, 2)
-    if exchange == "bingx":
-        return round(amount, 2)
+    """
+    cost — номинал позиции в USDT (position value).
+    """
     return round(amount * leverage, 2)
 
-
-def calculate_liquidation(entry: float, leverage: int | float, side: str, mm: float = 0.005) -> float:
-    if side == "long":
-        return entry * (1 - 1 / leverage + mm)
-    return entry * (1 + 1 / leverage - mm)
 
 def calculate_pnl_linear(
     entry: float,
@@ -696,21 +721,21 @@ def calculate_pnl_linear(
     leverage: float,
 ) -> tuple[float, float, float]:
     """
-    Расчёт как у Bybit/BingX для линейных USDT‑контрактов:
+    Линейные USDT‑контракты (Bybit, BingX):
     - pnl_usd: нереализованный PnL в USDT
-    - margin: маржа под позицию
+    - margin: маржа под позицию (entry * qty / leverage)
     - pnl_percent: PnL% = pnl_usd / margin * 100
     """
     if side not in ("long", "short"):
         raise ValueError("side must be 'long' or 'short'")
 
-    # 1) PnL в долларах
+    # 1) PnL в USDT
     if side == "long":
         pnl_usd = qty * (mark - entry)
-    else:  # short
+    else:
         pnl_usd = qty * (entry - mark)
 
-    # 2) Маржа (для линейных контрактов)
+    # 2) Маржа позиции
     margin = entry * qty / leverage if leverage else 0.0
 
     # 3) PnL% (ROI позиции)
@@ -719,27 +744,14 @@ def calculate_pnl_linear(
     return round(pnl_usd, 4), round(margin, 4), round(pnl_percent, 2)
 
 
-def calculate_pnl(
-    entry: float,
-    mark: float,
-    side: str,
-    leverage: float,
-) -> tuple[float, float]:
+def calculate_pnl(entry: float, mark: float, side: str, leverage: float) -> tuple[float, float]:
     """
-    Совместимо со старым кодом:
-    возвращает (percent, pnl),
-    где percent — PnL% позиции, pnl — PnL в USDT.
+    Оставляем для совместимости (qty = 1).
+    Для реальных позиций лучше использовать calculate_pnl_linear с реальным qty.
     """
-    qty = 1.0
-    pnl_usd, margin, pnl_percent = calculate_pnl_linear(
-        entry,
-        mark,
-        qty,
-        side,
-        leverage,
-    )
+    pnl_usd, margin, pnl_percent = calculate_pnl_linear(entry, mark, 1.0, side, leverage)
     return pnl_percent, pnl_usd
- 
+
 
 
 # =====================================================
@@ -863,7 +875,6 @@ def draw_gray_box(
     )
     draw.text((x, y), text, fill=(255, 255, 255), font=font, anchor="mm")
 
-
 def draw_side_badge(
     draw: ImageDraw.ImageDraw,
     x: int,
@@ -872,6 +883,7 @@ def draw_side_badge(
     color: tuple[int, int, int],
     exchange: str,
     fonts_cfg: dict,
+    cfg: dict | None = None,
 ):
     img_h = draw.im.size[1]
     badge_size = fonts_cfg["sizes"]["badge"]
@@ -882,24 +894,28 @@ def draw_side_badge(
         scale_font(badge_size, img_h),
     )
 
-    # разные размеры бокса для бирж
-    if exchange == "bingx":
-        padding_x = 16   # сделай какие хочешь для BingX
-        padding_y = 16.5
-        radius = 18
+    # 1. Сначала ВСЕГДА считаем размер рамки
+    if exchange == "bingx" and cfg is not None:
+        # фиксированный размер рамки для обычного BingX
+        box_w = cfg.get("w", 140)
+        box_h = cfg.get("h", 48)
+        radius = cfg.get("radius", 18)
+        text_offset_y = fonts_cfg["sizes"].get("badge_text_offset_y", 0)
     else:
-        padding_x = 16   # Bybit остаётся как был
+        # старое поведение для остальных
+        padding_x = 16
         padding_y = 18
         radius = 20
+        text_offset_y = 0
 
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
 
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+        box_w = text_w + padding_x * 2
+        box_h = text_h + padding_y * 1.5
 
-    box_w = text_w + padding_x * 2
-    box_h = text_h + padding_y * 2
-
+    # 2. Теперь всегда считаем координаты рамки
     x1 = x - box_w // 2
     y1 = y - box_h // 2
     x2 = x1 + box_w
@@ -913,7 +929,15 @@ def draw_side_badge(
         text_color = color
 
     draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill_color)
-    draw.text((x, y), text, fill=text_color, font=font, anchor="mm")
+
+    # 3. Текст по центру рамки + вертикальный offset
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    text_x = x1 + (box_w - text_w) / 2
+    text_y = y1 + (box_h - text_h) / 15 + text_offset_y
+    draw.text((text_x, text_y), text, fill=text_color, font=font)
 
 
 def clear_by_layout(img: Image.Image, draw: ImageDraw.ImageDraw, layout: dict, key: str):
@@ -971,9 +995,10 @@ def draw_bingx_icon(
 
     img.paste(icon, (x, y), icon)
 
-def generate_trade_image( dict, percent: float, pnl: float, pnl_usdt: float) -> str:
+def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
     template_path = os.path.join(BASE_DIR, "assets", data["exchange"], "template.png")
     output_path = os.path.join(BASE_DIR, "output", "result.png")
+
 
     cfg = FONTS[data["exchange"]]
     layout = LAYOUT[data["exchange"]]
@@ -1192,36 +1217,48 @@ def generate_trade_image( dict, percent: float, pnl: float, pnl_usdt: float) -> 
         h,
     )
 
-    # --- РИСК ТОЛЬКО ДЛЯ BINGX ---
     if data["exchange"] == "bingx" and "risk" in layout:
         entry = float(data.get("entry") or 0)
         qty = float(data.get("qty") or 0)
         margin = float(data.get("amount") or 0)
 
-        position_margin = entry * qty  # стоимость позиции
-
-        if position_margin <= 0 or margin <= 0:
+        position_margin = entry * qty
+        if position_margin == 0 or margin == 0:
             risk_text = "--"
+            risk_value = None
         else:
             risk = margin / position_margin * 100.0
-            # если после округления всё равно почти ноль – тоже ставим прочерки
             if round(risk, 2) == 0:
                 risk_text = "--"
+                risk_value = None
             else:
                 risk_text = f"{risk:.2f}%"
+                risk_value = risk
 
         rx, ry = pos(layout["risk"])
         risk_font = ImageFont.truetype(
             os.path.join(BASE_DIR, font_regular),
             sizes["leverage"],
         )
+
+        # выбор цвета по порогам
+        if risk_value is None:
+            risk_color = ORANGE      # например, когда "--"
+        elif risk_value <= 40:
+            risk_color = GREEN     # до 40% зелёный
+        elif risk_value <= 70:
+            risk_color = ORANGE    # 40–70% жёлтый/оранжевый
+        else:
+            risk_color = RED       # выше 70% красный
+
         draw.text(
             (rx, ry),
             risk_text,
-            fill=ORANGE,
+            fill=risk_color,
             font=risk_font,
             anchor=layout["risk"]["anchor"],
         )
+
 
 
     img.save(output_path)
@@ -1236,7 +1273,7 @@ def draw_custom_bingx_lines(
     font_symbol: ImageFont.FreeTypeFont,
     w: int,
     h: int,
-):
+) -> None:
     symbol = data["symbol"]
     cfg = layout.get("lines")
     if not cfg:
@@ -1250,18 +1287,17 @@ def draw_custom_bingx_lines(
     size = int(cfg.get("size", 80))
     line = line.resize((size, size), Image.LANCZOS)
 
-    base_x = int(cfg["x"] * w) + cfg.get("dx", 0)
-    base_y = int(cfg["y"] * h) + cfg.get("dy", 0)
+    base_x = int(cfg["x"] * w + cfg.get("dx", 0))
+    base_y = int(cfg["y"] * h + cfg.get("dy", 0))
 
+    # ширина символа, чтобы сдвинуть линии
     dummy = Image.new("RGBA", (10, 10))
     d = ImageDraw.Draw(dummy)
     bbox_sym = d.textbbox((0, 0), symbol, font=font_symbol)
     sym_width = bbox_sym[2] - bbox_sym[0]
-
     gap = cfg.get("gap", 10)
     spacing = cfg.get("spacing", 221)
 
-    # линии
     x1 = base_x + sym_width + gap
     y1 = base_y
     x2 = x1 + size + spacing
@@ -1272,27 +1308,40 @@ def draw_custom_bingx_lines(
 
     draw = ImageDraw.Draw(img)
 
-    # Лонг/Шорт между линиями
-    side_text = "Лонг" if data["side"] == "long" else "Шорт"
-    side_color = (0, 200, 120) if data["side"] == "long" else (230, 60, 60)
+    # позиция текста side по layout["side_position"]
+    side_cfg = layout.get("side_position", {})
+    side_x = int(side_cfg.get("x", 0.5) * w)
+    side_y = int(side_cfg.get("y", 0.335) * h)
 
-    mid_x = x1 + (x2 - x1) // 2 + cfg.get("side_dx", 0)
-    mid_y = y1 + size // 2 + cfg.get("side_dy", 0)
+    side_text = "Long" if data.get("side") == "long" else "Short"
+    side_color = (0, 200, 120) if data.get("side") == "long" else (230, 60, 60)
 
-    draw.text((mid_x, mid_y), side_text, fill=side_color, font=font_side, anchor="mm")
+    draw.text(
+        (side_x, side_y),
+        side_text,
+        fill=side_color,
+        font=font_side,
+        anchor=side_cfg.get("anchor", "lm"),
+    )
 
-    # плечо справа от правой линии
-    lev_raw = str(data["leverage"])
+    # позиция текста плеча по layout["leverage_position"]
+    lev_cfg = layout.get("leverage_position", {})
+    lev_x = int(lev_cfg.get("x", 0.15) * w)
+    lev_y = int(lev_cfg.get("y", 0.335) * h)
+
+    lev_raw = str(data.get("leverage", ""))
     lev_num = lev_raw.replace("x", "").upper()
-    lev_text = f"{lev_num}X"
+    lev_text = f"{lev_num}X" if lev_num else ""
 
-    bbox_lev = d.textbbox((0, 0), lev_text, font=font_side)
-    lev_width = bbox_lev[2] - bbox_lev[0]
+    if lev_text:
+        draw.text(
+            (lev_x, lev_y),
+            lev_text,
+            fill=(255, 255, 255),
+            font=font_side,
+            anchor=lev_cfg.get("anchor", "lm"),
+        )
 
-    lev_x = x2 + spacing + lev_width // 2 + cfg.get("lev_dx", 0)
-    lev_y = mid_y + cfg.get("lev_dy", 0)
-
-    draw.text((lev_x, lev_y), lev_text, fill=(255, 255, 255), font=font_side, anchor="mm")
 
 
 
@@ -1418,13 +1467,13 @@ def generate_custom_bybit_image(data: dict) -> str:
         draw.text(exit_pos, f"{data['exit']}", fill=WHITE, font=exit_font, anchor="lm")
 
     if "cross_leverage" in layout:
-        direction_text = "Long" if data["side"] == "long" else "Short"
+        direction_text = "Лонг" if data["side"] == "long" else "Шорт"
         leverage_num = float(str(data["leverage"]).replace("x", ""))
         lev_text = f"{direction_text} {leverage_num:.1f}X"
 
         base_x = layout["cross_leverage"]["x"] * w
         symbol_len = len(data["symbol"])
-        shift_x = symbol_len * 10 + 60
+        shift_x = symbol_len * 10 + 100
         lev_x = base_x + shift_x
         lev_y = layout["cross_leverage"]["y"] * h
         lev_pos = (lev_x, lev_y)
@@ -1508,7 +1557,8 @@ def generate_custom_bingx_image(data: dict) -> str:
         cfg["sizes"].get("leverage_text"),
     )
 
-    draw_custom_bingx_lines(img, data, layout, lev_font, symbol_font, w, h)
+    draw_custom_bingx_lines(img, data, layout, small_font, symbol_font, w, h)
+
 
     WHITE = (255, 255, 255)
     GREEN = (0, 200, 120)
@@ -1784,20 +1834,20 @@ async def custom_finish(msg: Message, state: FSMContext):
         "pnl": round(pnl_percent, 2),
         "entry": entry,
         "exit": exit_price,
-        "leverage": leverage_formatted,
         "side": side,
     }
 
     if exchange == "bingx":
+        # для кастомного BingX — отрисовываем ровно то плечо, которое ввёл пользователь
+        image_data["leverage"] = data["leverage"]          # например "20x"
         image_data["referral"] = data.get("referral", "")
         image_data["datetime_str"] = data.get("datetime_str", "")
-
-    if exchange == "bingx":
         path = generate_custom_bingx_image(image_data)
     else:
+        # для кастомного Bybit оставляем форматирование 20.0x
+        image_data["leverage"] = leverage_formatted
         path = generate_custom_bybit_image(image_data)
 
-    # удаляем последнее меню
     last_id = data.get("custom_last_msg_id")
     if last_id:
         try:
@@ -1807,6 +1857,7 @@ async def custom_finish(msg: Message, state: FSMContext):
 
     await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
     await state.clear()
+
 
 
 # =====================================================
